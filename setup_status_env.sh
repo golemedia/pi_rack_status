@@ -1,37 +1,60 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Create project folder
-mkdir -p ~/status
-cd ~/status
+# --- Config ---
+PROJECT_DIR="$HOME/status"
+VENV_DIR="$PROJECT_DIR/.venv"
+SERVICE_NAME="oled-status.service"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
+PY="$VENV_DIR/bin/python"
+PIP="$VENV_DIR/bin/pip"
+REQUIREMENTS="$PROJECT_DIR/requirements.txt"
+SCRIPT="$PROJECT_DIR/oled_status.py"
 
-# Create venv
-python3 -m venv .venv
+# --- Sanity checks ---
+if [[ ! -d "$PROJECT_DIR" ]]; then
+  echo "ERROR: $PROJECT_DIR does not exist. Create it first."; exit 1
+fi
+if [[ ! -f "$SCRIPT" ]]; then
+  echo "ERROR: $SCRIPT not found. Save oled_status.py there first."; exit 1
+fi
 
-# Requirements
-cat > requirements.txt <<'REQS'
+# --- Optional: normalize CRLF endings on the Python script (no dos2unix needed) ---
+# (Silently does nothing if already LF)
+sed -i 's/\r$//' "$SCRIPT"
+
+# --- System packages (build deps + fonts) ---
+# - python3-venv: to create venv
+# - python3-dev & build-essential: build RPi.GPIO wheel on 64-bit
+# - fonts-dejavu: ensures a baseline font is present for PIL if you ever switch
+sudo apt update
+sudo apt install -y python3-venv python3-dev build-essential fonts-dejavu
+
+# --- Create venv if missing ---
+if [[ ! -x "$PY" ]]; then
+  echo "Creating venv: $VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+fi
+
+# --- Requirements file (create if missing) ---
+if [[ ! -f "$REQUIREMENTS" ]]; then
+  cat > "$REQUIREMENTS" <<'REQS'
 luma.oled
 Pillow
 RPi.GPIO
 REQS
-
-# Install deps into the venv (without activating)
-./.venv/bin/pip install --upgrade pip wheel setuptools
-./.venv/bin/pip install -r requirements.txt
-
-# Ensure oled_status.py exists (skip if you already saved it)
-if [ ! -f oled_status.py ]; then
-  echo "ERROR: ~/status/oled_status.py not found. Save the script first."
-  exit 1
 fi
 
-# Create systemd service (root)
-SERVICE_FILE=/etc/systemd/system/oled-status.service
-sudo tee "$SERVICE_FILE" >/dev/null <<'UNIT'
+# --- Install/upgrade deps into the venv ---
+"$PIP" install --upgrade pip wheel setuptools
+# If RPi.GPIO previously failed due to missing headers, the new build deps will fix it:
+"$PIP" install --no-cache-dir -r "$REQUIREMENTS"
+
+# --- Create/Update systemd service (runs as root, starts early, shows 'IP: Connecting...') ---
+sudo tee "$SERVICE_PATH" >/dev/null <<UNIT
 [Unit]
 Description=OLED Status Display (early boot)
-# Start early, before network is fully online, so we can show "IP: Connecting..."
-# Local filesystems & udev settled ensure /dev/i2c-1 appears.
+# Start once udev has settled so /dev/i2c-1 is present; run before network is declared online.
 After=systemd-udev-settle.service local-fs.target
 Before=network-online.target multi-user.target
 Wants=systemd-udev-settle.service
@@ -40,21 +63,19 @@ Wants=systemd-udev-settle.service
 Type=simple
 User=root
 Group=root
-# Run the exact venv Python so imports are guaranteed
-ExecStart=/home/revgolem/status/.venv/bin/python /home/revgolem/status/oled_status.py
+ExecStart=$PY $SCRIPT
 Restart=always
 RestartSec=2
-# If I2C needs a moment on some kernels, a short start delay helps:
-# ExecStartPre=/bin/sleep 1
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
-# Reload systemd, enable and start
+# --- Enable & (re)start service ---
 sudo systemctl daemon-reload
-sudo systemctl enable oled-status.service
-sudo systemctl restart oled-status.service
+sudo systemctl enable "$SERVICE_NAME"
+sudo systemctl restart "$SERVICE_NAME"
 
-echo "✅ Service installed and started: oled-status.service"
-echo "   Check status: sudo systemctl status oled-status.service"
+echo "✅ Installed and started: $SERVICE_NAME"
+echo "   View logs: sudo journalctl -u $SERVICE_NAME -e -n 100"
+echo "   Status   : sudo systemctl status $SERVICE_NAME"

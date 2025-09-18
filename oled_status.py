@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # oled_status.py
 #
-# - 3 text lines with 10px spacing: Hostname (°C right-justified), IP (or Connecting...), Status
-# - Bottom single-pixel CPU usage bar with a 3px peak tick over last 10 samples
-# - Reboot button state machine on GPIO17 (pin 11) to GND:
-#     Hold 5s -> "Ready to Reboot"
-#     Release -> "Reboot in 5"
-#     Hold during countdown -> reboot at 0
-#     Release before 0 -> "Reboot Cancelled" 5s then normal
+# Display:
+#   Line 1: Hostname (left)  | CPU temp °C (right, 1 decimal)
+#   Line 2: IP: <addr>  (or "IP: Connecting..." until acquired)
+#   Line 3: Status: Running
+#   Bottom: 1px CPU usage bar + 3px peak tick (last 10 samples)
 #
-# Runs fine as a root-owned systemd service early in boot.
+# Reboot button on GPIO17 (pin 11) to GND:
+#   Hold 5s  -> show "Ready to Reboot"  (READY)
+#   Release  -> remain ARMED showing "Ready to Reboot"
+#   Press    -> start 5s countdown; keep holding to 0 to reboot
+#   Release before 0 -> "Reboot Cancelled" 5s, then NORMAL
 
 from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1306
@@ -40,7 +42,6 @@ def try_ip_addr():
     Return (ip_str, connected_bool).
     If network isn’t ready yet, return ("Connecting...", False).
     """
-    # This avoids blocking on DNS and works even before default route exists.
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(0.2)
     try:
@@ -134,14 +135,15 @@ def main(interval_status=1.0):
     hist = deque([cur], maxlen=10)
 
     # Button state machine
-    STATE = "NORMAL"              # NORMAL -> READY -> COUNTDOWN -> (reboot/cancel)
+    STATE = "NORMAL"         # NORMAL -> READY -> ARMED -> COUNTDOWN -> (REBOOT/CANCELLED)
     press_start = None
     countdown = 5
     cancel_show_until = 0.0
 
     # Timers
-    next_status_update = time.monotonic()     # when to refresh CPU/status
-    next_ip_probe = time.monotonic()          # when to re-check IP (faster while not ok)
+    now = time.monotonic()
+    next_status_update = now
+    next_ip_probe = now
 
     try:
         while True:
@@ -160,12 +162,18 @@ def main(interval_status=1.0):
                     press_start = None
 
             elif STATE == "READY":
+                # Stay here until user releases after the 5s hold
                 if not pressed:
+                    STATE = "ARMED"
+                    draw_message(dev, "Ready to Reboot")
+
+            elif STATE == "ARMED":
+                # Wait for a *new press* to start the countdown
+                if pressed:
                     STATE = "COUNTDOWN"
                     countdown = 5
                     draw_message(dev, f"Reboot in {countdown}")
-                    time.sleep(0.2)
-                    next_tick = time.monotonic() + 1.0
+                    next_tick = now + 1.0
 
             elif STATE == "COUNTDOWN":
                 if not pressed:
@@ -177,8 +185,9 @@ def main(interval_status=1.0):
                         countdown -= 1
                         if countdown <= 0:
                             draw_message(dev, "Rebooting...")
+                            # execv replaces the process; -f for immediate reboot
                             os.execv("/sbin/reboot", ["reboot", "-f"])
-                            time.sleep(60)
+                            time.sleep(60)  # fallback if reboot somehow fails
                         else:
                             draw_message(dev, f"Reboot in {countdown}")
                             next_tick = now + 1.0
@@ -190,14 +199,9 @@ def main(interval_status=1.0):
 
             # ---------- IP PROBE ----------
             if now >= next_ip_probe:
-                if not ip_ok:
-                    # Probe faster until IP appears
-                    ip_text, ip_ok = try_ip_addr()
-                    next_ip_probe = now + (0.5 if not ip_ok else 5.0)
-                else:
-                    # Once we have an IP, refresh occasionally
-                    ip_text, ip_ok = try_ip_addr()
-                    next_ip_probe = now + 5.0
+                # Probe quickly until we have an IP, then every 5s
+                ip_text, ip_ok = try_ip_addr()
+                next_ip_probe = now + (0.5 if not ip_ok else 5.0)
 
             # ---------- STATUS/CPU REFRESH (only in NORMAL) ----------
             if STATE == "NORMAL" and now >= next_status_update:
@@ -207,7 +211,6 @@ def main(interval_status=1.0):
                 pi, pt = ci, ct
                 hist.append(cur)
                 peak = max(hist)
-
                 draw_status(dev, host, ip_text, status, cur, peak, temp)
                 next_status_update = now + interval_status
 
