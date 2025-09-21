@@ -4,7 +4,7 @@
 # Display:
 #   Line 1: Hostname (left)  | CPU temp °C (right, 1 decimal)
 #   Line 2: IP: <addr or Connecting...> (left) | UV status (right: OK/UV!/NA)
-#   Line 3: Status: Running
+#   Line 3: Status: Running - Placeholder for adding specific app / service status
 #   Bottom: 1px CPU usage bar + 3px peak tick (last 10 samples)
 #
 # Reboot button on GPIO17 (pin 11) to GND:
@@ -23,7 +23,7 @@ import socket, time, os, subprocess
 # ---- Display constants ----
 I2C_ADDR = 0x3C
 W, H = 128, 32
-LINE_SPACING = 10          # y = 0,10,20 for 3 text lines
+LINE_SPACING = 10
 FONT = ImageFont.load_default()
 MAX_CHARS = 21
 BOTTOM_Y = 31
@@ -66,7 +66,7 @@ def read_cpu_times():
     with open("/proc/stat", "r") as f:
         p = f.readline().split()
     vals = list(map(int, p[1:]))
-    idle = vals[3] + vals[4]   # idle + iowait
+    idle = vals[3] + vals[4]
     total = sum(vals)
     return idle, total
 
