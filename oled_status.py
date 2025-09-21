@@ -3,7 +3,7 @@
 #
 # Display:
 #   Line 1: Hostname (left)  | CPU temp °C (right, 1 decimal)
-#   Line 2: IP: <addr>  (or "IP: Connecting..." until acquired)
+#   Line 2: IP: <addr or Connecting...> (left) | UV status (right: OK/UV!/NA)
 #   Line 3: Status: Running
 #   Bottom: 1px CPU usage bar + 3px peak tick (last 10 samples)
 #
@@ -18,7 +18,7 @@ from luma.oled.device import ssd1306
 from PIL import Image, ImageDraw, ImageFont
 from collections import deque
 import RPi.GPIO as GPIO
-import socket, time, os
+import socket, time, os, subprocess
 
 # ---- Display constants ----
 I2C_ADDR = 0x3C
@@ -78,6 +78,24 @@ def cpu_percent(prev_i, prev_t, cur_i, cur_t):
     if used > 100: return 100.0
     return used
 
+def undervoltage_status():
+    """
+    Uses vcgencmd get_throttled to detect undervoltage.
+    Returns "UV!" if currently/past undervoltage flagged, "OK" otherwise, "NA" if unavailable.
+    Bits: 0x1=undervoltage now, 0x10000=undervoltage occurred.
+    """
+    try:
+        out = subprocess.check_output(
+            ["/usr/bin/vcgencmd", "get_throttled"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        val = int(out.split("=")[1], 16)
+        if (val & 0x1) or (val & 0x10000):
+            return "UV!"
+        return "OK"
+    except Exception:
+        return "NA"
+
 def draw_status(dev, host, ip_text, status, cur_pct, peak_pct, temp):
     img = Image.new("1", (W, H), 0)
     d = ImageDraw.Draw(img)
@@ -89,8 +107,12 @@ def draw_status(dev, host, ip_text, status, cur_pct, peak_pct, temp):
     d.text((0, 0), left_txt, font=FONT, fill=255)
     d.text((W - temp_w, 0), temp_txt, font=FONT, fill=255)
 
-    # Line 2: IP or Connecting...
-    d.text((0, 10), clamp(f"IP: {ip_text}"), font=FONT, fill=255)
+    # Line 2: IP left, undervoltage status right (OK/UV!/NA)
+    ip_txt = clamp(f"IP: {ip_text}")
+    uv_txt = undervoltage_status()
+    uv_w = d.textlength(uv_txt, font=FONT)
+    d.text((0, 10), ip_txt, font=FONT, fill=255)
+    d.text((W - uv_w, 10), uv_txt, font=FONT, fill=255)
 
     # Line 3: Status text
     d.text((0, 20), clamp(f"Status: {status}"), font=FONT, fill=255)
