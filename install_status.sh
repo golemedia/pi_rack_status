@@ -44,7 +44,6 @@ enable_i2c_dtparam() {
     warn "Could not find config.txt; skipping firmware dtparam check."
     return
   fi
-
   if ! grep -q '^[[:space:]]*dtparam=i2c_arm=on' "$cfg"; then
     log "Enabling I²C in $cfg"
     echo "dtparam=i2c_arm=on" | sudo tee -a "$cfg" >/dev/null
@@ -53,9 +52,8 @@ enable_i2c_dtparam() {
 }
 
 ensure_i2c_dev_module() {
-  # Persist at boot
+  # Persist at boot and load now so first run works without reboot
   echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf >/dev/null
-  # Load now (so first run works without reboot)
   sudo modprobe i2c_dev || true
 }
 
@@ -82,7 +80,7 @@ def setmode(_): pass
 def setup(pin, mode, pull_up_down=None):
     _buttons[pin]=Button(pin, pull_up=True, bounce_time=0.05)
 def input(pin):
-    b=_buttons.get(pin); 
+    b=_buttons.get(pin)
     return 1 if b is None else (0 if b.is_pressed else 1)
 def cleanup():
     for b in _buttons.values():
@@ -106,7 +104,7 @@ Wants=systemd-udev-settle.service
 Type=simple
 User=root
 Group=root
-# Guard so we don't start until an i2c node exists; Restart keeps retrying.
+# Start only once at least one i2c node exists; restart keeps retrying early in boot.
 ExecStartPre=/usr/bin/test -e /dev/i2c-1 -o -e /dev/i2c-2
 ExecStart=$PY $SCRIPT
 Restart=always
@@ -117,27 +115,41 @@ WantedBy=multi-user.target
 UNIT
 }
 
+ensure_vcgencmd() {
+  if ! command -v vcgencmd >/dev/null 2>&1; then
+    # On Bookworm, vcgencmd comes from raspi-utils (avoid libraspberrypi-bin conflict).
+    log "Installing raspi-utils (vcgencmd provider)"
+    sudo apt install -y raspi-utils || true
+    if ! command -v vcgencmd >/dev/null 2>&1; then
+      warn "vcgencmd not available (raspi-utils not installed). Undervoltage will show 'NA'."
+    fi
+  fi
+}
+
 # -----------------------------
 # RUN
 # -----------------------------
 log "Project dir: $PROJECT_DIR"
 
-# 1) System packages
+# 1) System packages (NO libraspberrypi-bin here; it conflicts on Bookworm)
 log "Installing system packages"
 sudo apt update
 sudo apt install -y \
   python3-venv python3-dev build-essential \
-  fonts-dejavu libraspberrypi-bin i2c-tools \
+  fonts-dejavu i2c-tools \
   python3-gpiozero python3-lgpio
 
-# 2) Enable I²C in firmware + ensure i2c-dev loads at boot (and now)
+# 2) Enable I²C and ensure i2c-dev device node exists now and at boot
 enable_i2c_dtparam
 ensure_i2c_dev_module
 
-# 3) Download latest app + requirements
+# 3) Ensure vcgencmd is available without pulling in conflicting packages
+ensure_vcgencmd
+
+# 4) Download latest app + requirements
 fetch_latest_files
 
-# 4) Create venv (if needed) and upgrade pip tooling
+# 5) Create venv (if needed) and upgrade pip tooling
 if [[ ! -x "$PY" ]]; then
   log "Creating virtual environment: $VENV_DIR"
   python3 -m venv "$VENV_DIR"
@@ -145,14 +157,14 @@ fi
 log "Upgrading pip/wheel/setuptools"
 "$PIP" install --upgrade pip wheel setuptools
 
-# 5) Pi 5 shim (any-model support)
+# 6) Pi 5 shim (any-model support)
 create_pi5_gpio_shim_if_needed
 
-# 6) Install Python deps
+# 7) Install Python deps
 log "Installing Python deps from requirements.txt"
 "$PIP" install --no-cache-dir -r "$REQS"
 
-# 7) Write/enable/start service
+# 8) Write/enable/start service
 write_service
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
