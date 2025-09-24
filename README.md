@@ -27,3 +27,9 @@
 - Release before countdown ends to cancel reboot
 
 &nbsp;
+## To install:
+
+mkdir -p ~/status && cd ~/status
+curl -fsSL https://raw.githubusercontent.com/golemedia/pi_rack_status/main/install_status.sh -o install_status.sh
+chmod +x install_status.sh
+./install_status.sh
